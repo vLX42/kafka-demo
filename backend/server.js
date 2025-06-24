@@ -3,6 +3,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const { Kafka } = require('kafkajs');
 const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
@@ -20,18 +21,18 @@ app.use(express.json());
 // Kafka configuration
 const kafka = new Kafka({
   clientId: 'freight-booking-consumer',
-  brokers: ['localhost:9092'], // Update with your Kafka brokers
+  brokers: [process.env.KAFKA_BOOTSTRAP_SERVER], // Update with your Kafka brokers
   // Add authentication if needed
-  // sasl: {
-  //   mechanism: 'plain',
-  //   username: 'your-username',
-  //   password: 'your-password'
-  // },
-  // ssl: true
+  sasl: {
+    mechanism: 'plain',
+    username: process.env.KAFKA_USERNAME,
+    password: process.env.KAFKA_PASSWORD,
+  },
+  ssl: true
 });
 
 const consumer = kafka.consumer({ 
-  groupId: 'freight-booking-frontend-group',
+  groupId: process.env.KAFKA_GROUP_ID,
   sessionTimeout: 30000,
   heartbeatInterval: 3000,
 });
