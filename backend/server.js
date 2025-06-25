@@ -14,15 +14,13 @@ const io = socketIo(server, {
   },
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Kafka configuration
+// Kafka setup
 const kafka = new Kafka({
   clientId: "freight-booking-consumer",
-  brokers: [process.env.KAFKA_BOOTSTRAP_SERVER], // Update with your Kafka brokers
-  // Add authentication if needed
+  brokers: [process.env.KAFKA_BOOTSTRAP_SERVER],
   sasl: {
     mechanism: "plain",
     username: process.env.KAFKA_USERNAME,
@@ -37,100 +35,48 @@ const consumer = kafka.consumer({
   heartbeatInterval: 3000,
 });
 
-// Topics to subscribe to
-const TOPICS = [
-  "pub.freightbooking-xygoq.booking",
-  "pub.freight-booking-reques-ebezm.status",
-];
-
-// Store connected clients by customer ID
-const customerConnections = new Map();
-
-// Socket.IO connection handling
+// Socket.IO logic using rooms
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
-  // Handle customer subscription
   socket.on("subscribe", ({ customerId }) => {
     if (!customerId) {
       socket.emit("error", { message: "Customer ID is required" });
       return;
     }
 
-    console.log(`Client ${socket.id} subscribing to customer ${customerId}`);
-
-    // Store the customer ID with the socket
-    socket.customerId = customerId;
-
-    // Add to customer connections map
-    if (!customerConnections.has(customerId)) {
-      customerConnections.set(customerId, new Set());
-    }
-    customerConnections.get(customerId).add(socket);
-
-    socket.emit("subscribed", { customerId });
+    const room = `cust${customerId}`;
+    socket.join(room);
+    socket.emit("subscribed", { room });
+    console.log(`Socket ${socket.id} joined room: ${room}`);
   });
 
-  // Handle unsubscribe
-  socket.on("unsubscribe", () => {
-    if (socket.customerId) {
-      const customerSockets = customerConnections.get(socket.customerId);
-      if (customerSockets) {
-        customerSockets.delete(socket);
-        if (customerSockets.size === 0) {
-          customerConnections.delete(socket.customerId);
-        }
-      }
-      console.log(
-        `Client ${socket.id} unsubscribed from customer ${socket.customerId}`
-      );
-      socket.customerId = null;
-    }
+  socket.on("unsubscribe", ({ customerId }) => {
+    const room = `cust${customerId}`;
+    socket.leave(room);
+    console.log(`Socket ${socket.id} left room: ${room}`);
   });
 
-  // Handle disconnect
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
-    if (socket.customerId) {
-      const customerSockets = customerConnections.get(socket.customerId);
-      if (customerSockets) {
-        customerSockets.delete(socket);
-        if (customerSockets.size === 0) {
-          customerConnections.delete(socket.customerId);
-        }
-      }
-    }
+    // No manual cleanup needed – rooms are managed by Socket.IO
   });
 });
 
-// Function to extract customer ID from Kafka message
+// Kafka message parsing
 function extractCustomerId(message) {
   try {
     const data = JSON.parse(message.value.toString());
 
-    // For booking events
-    if (data.data && data.data.customerId) {
-      return data.data.customerId.toString();
-    }
-
-    // For status events
-    if (data.data && data.data.customerId) {
-      return data.data.customerId.toString();
-    }
-
-    // Fallback - check root level
-    if (data.customerId) {
-      return data.customerId.toString();
-    }
-
-    return null;
-  } catch (error) {
-    console.error("Error extracting customer ID:", error);
+    return (
+      data?.data?.customerId?.toString() || data?.customerId?.toString() || null
+    );
+  } catch (err) {
+    console.error("Failed to parse Kafka message", err);
     return null;
   }
 }
 
-// Function to format Kafka message for frontend
 function formatMessageForFrontend(message, topic) {
   try {
     const data = JSON.parse(message.value.toString());
@@ -138,7 +84,7 @@ function formatMessageForFrontend(message, topic) {
     return {
       id: data.messageId || Math.random().toString(36).substr(2, 9),
       timestamp: data.dateTime || new Date().toISOString(),
-      topic: topic,
+      topic,
       partition: message.partition,
       offset: message.offset,
       key: message.key ? message.key.toString() : "",
@@ -149,80 +95,49 @@ function formatMessageForFrontend(message, topic) {
           )
         : {},
     };
-  } catch (error) {
-    console.error("Error formatting message:", error);
+  } catch (err) {
+    console.error("Error formatting message", err);
     return null;
   }
 }
 
-// Start Kafka consumer
+// Kafka topics
+const TOPICS = [
+  "pub.freightbooking-xygoq.booking",
+  "pub.freight-booking-reques-ebezm.status",
+];
+
+// Kafka consumer
 async function startKafkaConsumer() {
   try {
     await consumer.connect();
     console.log("Connected to Kafka");
 
-    // Subscribe to topics
-    await consumer.subscribe({
-      topics: TOPICS,
-      fromBeginning: false,
-    });
-
+    await consumer.subscribe({ topics: TOPICS, fromBeginning: false });
     console.log("Subscribed to topics:", TOPICS);
 
-    // Process messages
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
-        try {
-          console.log(
-            `Received message from ${topic}:${partition}:${message.offset}`
-          );
+        const customerId = extractCustomerId(message);
+        if (!customerId) return;
 
-          // Extract customer ID
-          const customerId = extractCustomerId(message);
+        const formatted = formatMessageForFrontend(message, topic);
+        if (!formatted) return;
 
-          if (!customerId) {
-            console.log("No customer ID found in message, skipping");
-            return;
-          }
-
-          // Check if any clients are subscribed to this customer
-          const customerSockets = customerConnections.get(customerId);
-
-          if (!customerSockets || customerSockets.size === 0) {
-            console.log(`No clients subscribed to customer ${customerId}`);
-            return;
-          }
-
-          // Format message for frontend
-          const formattedMessage = formatMessageForFrontend(message, topic);
-
-          if (!formattedMessage) {
-            console.error("Failed to format message");
-            return;
-          }
-
-          // Send to all clients subscribed to this customer
-          customerSockets.forEach((socket) => {
-            socket.emit("kafka-event", formattedMessage);
-          });
-
-          console.log(
-            `Sent message to ${customerSockets.size} clients for customer ${customerId}`
-          );
-        } catch (error) {
-          console.error("Error processing message:", error);
-        }
+        const room = `cust${customerId}`;
+        io.to(room).emit("kafka-event", formatted);
+        console.log(`Emitted event to room: ${room}`);
       },
     });
-  } catch (error) {
-    console.error("Error starting Kafka consumer:", error);
+  } catch (err) {
+    console.error("Kafka error:", err);
     process.exit(1);
   }
 }
 
 // Graceful shutdown
 process.on("SIGINT", async () => {
-  console.log("Shutting down gracefully...");
+  console.log("Shutting down...");
   await consumer.disconnect();
   server.close(() => {
     console.log("Server closed");
@@ -230,15 +145,12 @@ process.on("SIGINT", async () => {
   });
 });
 
-// Health check endpoint
+// Health check
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    connectedCustomers: Array.from(customerConnections.keys()),
-    totalConnections: Array.from(customerConnections.values()).reduce(
-      (sum, sockets) => sum + sockets.size,
-      0
-    ),
+    totalConnections: io.engine.clientsCount,
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -248,5 +160,3 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   startKafkaConsumer();
 });
-
-module.exports = { app, server };

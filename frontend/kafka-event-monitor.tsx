@@ -55,7 +55,6 @@ export default function Component() {
     if (typeof window === "undefined") return null;
 
     try {
-      // Import socket.io-client dynamically
       const io = require("socket.io-client");
       const socket = io("http://localhost:4000", {
         autoConnect: false,
@@ -93,17 +92,20 @@ export default function Component() {
         }
       });
 
-      socket.on("subscribed", ({ customerId }: { customerId: string }) => {
-        console.log("Subscribed to customer:", customerId);
+      // 👇 Modified to support room name like "cust1234"
+      socket.on("subscribed", ({ room }: { room: string }) => {
+        console.log("Subscribed to room:", room);
+        const match = room.match(/^cust(.+)$/);
+        const id = match?.[1] || "unknown";
         setIsConnected(true);
-        setSubscribedCustomerId(customerId);
+        setSubscribedCustomerId(id);
         setEvents([]);
       });
 
       socket.on("kafka-event", (event: KafkaEvent) => {
         console.log("Received Kafka event:", event);
         if (!isPaused) {
-          setEvents((prev) => [event, ...prev].slice(0, 100)); // Keep only last 100 events
+          setEvents((prev) => [event, ...prev].slice(0, 100));
         }
       });
 
@@ -140,7 +142,6 @@ export default function Component() {
       socketRef.current.connect();
     }
 
-    // Wait for connection before subscribing
     const subscribeWhenConnected = () => {
       if (socketRef.current.connected) {
         socketRef.current.emit("subscribe", { customerId });
@@ -156,7 +157,9 @@ export default function Component() {
 
   const disconnectFromKafka = () => {
     if (socketRef.current) {
-      socketRef.current.emit("unsubscribe");
+      socketRef.current.emit("unsubscribe", {
+        customerId: subscribedCustomerId,
+      });
       socketRef.current.disconnect();
     }
     setIsConnected(false);
